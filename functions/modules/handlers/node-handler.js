@@ -10,6 +10,64 @@ import { parseNodeList } from '../utils/node-parser.js';
 // 创建用于全局匹配的协议正则表达式
 const NODE_PROTOCOL_GLOBAL_REGEX = new RegExp('^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5|socks):\\/\\/', 'gm');
 
+function decodeMaybeBase64Text(text) {
+    if (!text || typeof text !== 'string') {
+        return '';
+    }
+
+    const cleanedText = text.replace(/\s/g, '');
+    let normalized = cleanedText.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = normalized.length % 4;
+    if (padding) {
+        normalized += '='.repeat(4 - padding);
+    }
+
+    if (!/^[A-Za-z0-9+/=]+$/.test(normalized) || normalized.length < 20) {
+        return text;
+    }
+
+    try {
+        const binaryString = atob(normalized);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return new TextDecoder('utf-8').decode(bytes);
+    } catch {
+        return text;
+    }
+}
+
+function looksLikeInvalidSubscriptionContent(text, contentType = '') {
+    const trimmed = (text || '').trim();
+    if (!trimmed) {
+        return false;
+    }
+
+    const normalizedContentType = String(contentType || '').toLowerCase();
+    if (normalizedContentType.includes('text/html')) {
+        return true;
+    }
+
+    const lowerText = trimmed.toLowerCase();
+    return lowerText.includes('<html')
+        || lowerText.includes('<!doctype html')
+        || lowerText.includes('<body')
+        || lowerText.includes('access denied')
+        || lowerText.includes('forbidden')
+        || lowerText.includes('unauthorized')
+        || lowerText.includes('captcha')
+        || lowerText.includes('cloudflare')
+        || lowerText.includes('expired')
+        || lowerText.includes('token invalid')
+        || lowerText.includes('token is invalid')
+        || lowerText.includes('please login')
+        || lowerText.includes('subscription has expired')
+        || lowerText.includes('订阅已过期')
+        || lowerText.includes('请先登录')
+        || lowerText.includes('访问被拒绝');
+}
+
 /**
  * 获取订阅节点数量和用户信息
  * @param {Object} request - HTTP请求对象
@@ -163,6 +221,8 @@ export async function handleNodeCountRequest(request, env) {
                 const nodeCountResponse = responses[1].value;
                 const buffer = await nodeCountResponse.arrayBuffer();
                 const text = new TextDecoder('utf-8').decode(buffer);
+                const decodedText = decodeMaybeBase64Text(text);
+                const responseContentType = nodeCountResponse.headers.get('content-type') || '';
 
                 // 使用与预览功能相同的节点解析逻辑
                 try {
@@ -182,23 +242,6 @@ export async function handleNodeCountRequest(request, env) {
                     // [回退2] 如果响应头中也没有流量信息，尝试从 body 伪节点中解析
                     // 这在使用 FetchProxy（如 Vercel）时非常重要，因为代理会丢弃上游响应头
                     if (!result.userInfo) {
-                        // 需要先解码 base64（如果是 base64 编码的话）
-                        let decodedText = text;
-                        try {
-                            const cleanedText = text.replace(/\s/g, '');
-                            let normalized = cleanedText.replace(/-/g, '+').replace(/_/g, '/');
-                            const padding = normalized.length % 4;
-                            if (padding) normalized += '='.repeat(4 - padding);
-                            if (/^[A-Za-z0-9+/=]+$/.test(normalized) && normalized.length >= 20) {
-                                const binaryString = atob(normalized);
-                                const bytes = new Uint8Array(binaryString.length);
-                                for (let i = 0; i < binaryString.length; i++) {
-                                    bytes[i] = binaryString.charCodeAt(i);
-                                }
-                                decodedText = new TextDecoder('utf-8').decode(bytes);
-                            }
-                        } catch { /* 已经是明文 */ }
-
                         const bodyInfo = extractUserInfoFromBody(decodedText);
                         if (bodyInfo) {
                             console.info('[NodeHandler] Successfully extracted traffic info from body fake nodes (Fallback 2).');
@@ -209,36 +252,28 @@ export async function handleNodeCountRequest(request, env) {
 
                     result.count = parsedNodes.length;
                     nodeCountRequestSucceeded = true;
+
+                    if (
+                        parsedNodes.length === 0
+                        && looksLikeInvalidSubscriptionContent(decodedText, responseContentType)
+                    ) {
+                        console.warn(`[NodeHandler] Invalid subscription payload detected for ${subUrl}`);
+                        result.error = '返回内容不是可解析的订阅，可能被机场风控、订阅失效，或需要配置 fetchProxy / 自定义 UA';
+                        result.errorType = 'invalid_content';
+                        nodeCountRequestSucceeded = false;
+                    }
                 } catch (e) {
                     // 解析失败，尝试简单统计
                     console.error('Node count parse error:', e);
 
                     try {
-                        const cleanedText = text.replace(/\s/g, '');
-                        let normalized = cleanedText.replace(/-/g, '+').replace(/_/g, '/');
-                        const padding = normalized.length % 4;
-                        if (padding) {
-                            normalized += '='.repeat(4 - padding);
-                        }
-                        const base64Regex = /^[A-Za-z0-9+\/=]+$/;
-                        if (base64Regex.test(normalized) && normalized.length >= 20) {
-                            const binaryString = atob(normalized);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i);
-                            }
-                            const processedText = new TextDecoder('utf-8').decode(bytes);
-                            const lineMatches = processedText.match(NODE_PROTOCOL_GLOBAL_REGEX);
-                            if (lineMatches) {
-                                result.count = lineMatches.length;
-                                nodeCountRequestSucceeded = true;
-                            }
-                        } else {
-                            const lineMatches = text.match(NODE_PROTOCOL_GLOBAL_REGEX);
-                            if (lineMatches) {
-                                result.count = lineMatches.length;
-                                nodeCountRequestSucceeded = true;
-                            }
+                        const lineMatches = decodedText.match(NODE_PROTOCOL_GLOBAL_REGEX);
+                        if (lineMatches) {
+                            result.count = lineMatches.length;
+                            nodeCountRequestSucceeded = true;
+                        } else if (looksLikeInvalidSubscriptionContent(decodedText, responseContentType)) {
+                            result.error = '返回内容不是可解析的订阅，可能被机场风控、订阅失效，或需要配置 fetchProxy / 自定义 UA';
+                            result.errorType = 'invalid_content';
                         }
                     } catch (error) {
                         // 最后降级到原始文本统计
@@ -261,13 +296,16 @@ export async function handleNodeCountRequest(request, env) {
             // 检查是否两个请求都失败了
             if (!trafficRequestSucceeded && !nodeCountRequestSucceeded) {
                 // 两个请求都失败,返回错误信息
-                let errorType = 'fetch_failed';
-                let errorMessage = '订阅获取失败';
+                let errorType = result.errorType || 'fetch_failed';
+                let errorMessage = result.error || '订阅获取失败';
 
                 if (fetchError) {
                     if (fetchError.name === 'AbortError' || fetchError.message?.includes('timeout')) {
                         errorType = 'timeout';
                         errorMessage = '订阅请求超时';
+                    } else if (result.errorType === 'invalid_content') {
+                        errorType = 'invalid_content';
+                        errorMessage = result.error;
                     } else if (fetchError.message?.includes('network') || fetchError.message?.includes('fetch')) {
                         errorType = 'network';
                         errorMessage = '网络连接失败';
@@ -376,6 +414,8 @@ export async function handleBatchUpdateNodesRequest(request, env) {
                 }
 
                 const text = await response.text();
+                const decodedText = decodeMaybeBase64Text(text);
+                const responseContentType = response.headers.get('content-type') || '';
 
                 // 使用与预览功能相同的解码和节点统计逻辑
                 let nodeCount = 0;
@@ -383,24 +423,21 @@ export async function handleBatchUpdateNodesRequest(request, env) {
                     // 使用 parseNodeList 函数，与预览功能完全一致
                     const parsedNodes = parseNodeList(text);
                     nodeCount = parsedNodes.length;
+                    if (nodeCount === 0 && looksLikeInvalidSubscriptionContent(decodedText, responseContentType)) {
+                        throw new Error('返回内容不是可解析的订阅，可能需要配置 fetchProxy / 自定义 UA');
+                    }
                 } catch (e) {
                     // 解码失败，尝试简单统计
                     console.error('Batch update decode error:', e);
                     try {
-                        const cleanedText = text.replace(/\s/g, '');
-                        const base64Regex = /^[A-Za-z0-9+\/=]+$/;
-                        if (base64Regex.test(cleanedText) && cleanedText.length >= 20) {
-                            const binaryString = atob(cleanedText);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i);
-                            }
-                            const processedText = new TextDecoder('utf-8').decode(bytes);
-                            nodeCount = (processedText.match(NODE_PROTOCOL_GLOBAL_REGEX) || []).length;
-                        } else {
-                            nodeCount = (text.match(NODE_PROTOCOL_GLOBAL_REGEX) || []).length;
+                        nodeCount = (decodedText.match(NODE_PROTOCOL_GLOBAL_REGEX) || []).length;
+                        if (nodeCount === 0 && looksLikeInvalidSubscriptionContent(decodedText, responseContentType)) {
+                            throw new Error('返回内容不是可解析的订阅，可能需要配置 fetchProxy / 自定义 UA');
                         }
-                    } catch {
+                    } catch (fallbackError) {
+                        if (looksLikeInvalidSubscriptionContent(decodedText, responseContentType)) {
+                            throw fallbackError;
+                        }
                         // 如果都失败，使用原始文本进行统计
                         nodeCount = (text.match(NODE_PROTOCOL_GLOBAL_REGEX) || []).length;
                     }

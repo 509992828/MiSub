@@ -114,6 +114,15 @@ export async function fetchNodeCount(subUrl, fetchProxy = '', plusAsSpace = fals
         const data = await api.post('/api/node_count', payload, { signal: controller.signal });
         clearTimeout(timeoutId);
 
+        if (data && (data.error || data.errorType)) {
+            return {
+                success: false,
+                error: data.error || '订阅获取失败',
+                errorType: data.errorType || 'server',
+                data
+            };
+        }
+
         return { success: true, data }; // data 包含 { count, userInfo }
     } catch (error) {
         return handleApiError(error, 'fetchNodeCount');

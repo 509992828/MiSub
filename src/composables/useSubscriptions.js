@@ -95,6 +95,9 @@ export function useSubscriptions(markDirty) {
           case 'network':
             userMessage = `${subToUpdate.name || '订阅'} 网络连接失败`;
             break;
+          case 'invalid_content':
+            userMessage = `${subToUpdate.name || '订阅'} 返回的不是可解析订阅，通常是机场风控、订阅失效，或需要 fetchProxy / 自定义 UA`;
+            break;
           case 'server':
             userMessage = `${subToUpdate.name || '订阅'} 服务器错误`;
             break;
