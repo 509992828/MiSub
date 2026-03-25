@@ -99,7 +99,13 @@ export function useSubscriptions(markDirty) {
             userMessage = `${subToUpdate.name || '订阅'} 返回的不是可解析订阅，通常是机场风控、订阅失效，或需要 fetchProxy / 自定义 UA`;
             break;
           case 'server':
-            userMessage = `${subToUpdate.name || '订阅'} 服务器错误`;
+            if (typeof result.error === 'string' && result.error.includes('HTTP 403')) {
+              userMessage = `${subToUpdate.name || '订阅'} 被上游拒绝访问（HTTP 403），通常需要 fetchProxy 或自定义 UA`;
+            } else if (typeof result.error === 'string' && result.error.includes('HTTP 429')) {
+              userMessage = `${subToUpdate.name || '订阅'} 被上游限流（HTTP 429），请稍后重试或配置 fetchProxy`;
+            } else {
+              userMessage = `${subToUpdate.name || '订阅'} 更新失败: ${result.error}`;
+            }
             break;
           default:
             userMessage = `${subToUpdate.name || '订阅'} 更新失败: ${result.error}`;
