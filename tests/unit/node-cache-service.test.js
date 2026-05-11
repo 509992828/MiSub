@@ -5,6 +5,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
     getCache,
+    setCache,
     createCacheHeaders,
     triggerBackgroundRefresh,
     getCacheConfig
@@ -29,11 +30,11 @@ describe('node-cache-service', () => {
     });
 
     it('returns stale/expired based on age', async () => {
-        const { STALE_TTL, MAX_AGE } = getCacheConfig();
+        const { FRESH_TTL, STALE_TTL, MAX_AGE } = getCacheConfig();
         const now = Date.now();
 
         const storage = createStorage({
-            stale: { nodes: 'a', timestamp: now - 1000, nodeCount: 1, sources: [] },
+            stale: { nodes: 'a', timestamp: now - (FRESH_TTL + 1000), nodeCount: 1, sources: [] },
             expired: { nodes: 'b', timestamp: now - (STALE_TTL + 1000), nodeCount: 2, sources: [] },
             miss: { nodes: 'c', timestamp: now - (MAX_AGE + 1000), nodeCount: 3, sources: [] }
         });
@@ -64,5 +65,23 @@ describe('node-cache-service', () => {
 
         expect(waitUntil).toHaveBeenCalledTimes(1);
         expect(refreshFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to overwrite an existing non-empty cache with an empty node list', async () => {
+        const storage = createStorage({
+            cache: {
+                nodes: 'trojan://password@1.2.3.4:443#HK-01\n',
+                timestamp: Date.now(),
+                nodeCount: 1,
+                sources: ['机场']
+            }
+        });
+
+        const updated = await setCache(storage, 'cache', '', ['机场']);
+        const cached = await getCache(storage, 'cache');
+
+        expect(updated).toBe(false);
+        expect(cached.data.nodes).toBe('trojan://password@1.2.3.4:443#HK-01\n');
+        expect(cached.data.nodeCount).toBe(1);
     });
 });
